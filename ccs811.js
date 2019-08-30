@@ -18,13 +18,24 @@ exports.plugin = function() {
 // Registers
 	const CCS811_HW_ID			=		0x20;
 	const CCS811_STATUS			=		0x00;
-	const CCS811_APP_START		=		0xF4;
 	const CCS811_MEAS_MODE		=		0x01;
 	const CCS811_ERROR_ID		=		0xE0;
 	const CCS811_RAW_DATA		=		0x03;
 	const CCS811_ALG_RESULT_DATA  =		0x02;
 	const CCS811_BASELINE         =		0x11;
 	const CCS811_ENV_DATA         =		0x05;
+	const CCS811_FW_BOOT_VERSION  =		0x24;
+	const CCS811_HW_VERSION		  =		0x21;
+
+	const CCS811_APP_ERASE	  	=		0xF1;
+	const CCS811_APP_DATA	 	=		0xF2;
+	const CCS811_APP_VERIFY	  	=		0xF3;
+	const CCS811_APP_START		=		0xF4;
+
+	const CCS811_SW_RESET		=		0xFF;
+
+	const CCS811_APP_ERASE_SEQ	=		Buffer.from([0xE7, 0xA7, 0xE6, 0x09]);
+	const CCS811_SW_RESET_SEQ	  =		Buffer.from([0x11, 0xE5, 0x72, 0x8A]);
 
 // Modes
 
@@ -41,6 +52,7 @@ exports.plugin = function() {
 		'HEATER_FAULT',
 		'HEATER_SUPPLY'
 	];
+
 
 	class Mutex {
 		constructor () {
@@ -252,7 +264,11 @@ exports.plugin = function() {
 			return this.readSensor(CCS811_ALG_RESULT_DATA, 5)
 				.then(data => {
 					const status = data.readUInt8(4);
-					if(status & 0x8) return { eco2: data.readUInt16BE(0), tvoc: data.readUInt16BE(2) };
+					if((status & 0x8) === 0x8) {
+						console.log(data);
+						console.log(" " + data.readUInt16BE(0) + " " + data.readUInt16BE(2));
+						return { eco2: data.readUInt16BE(0), tvoc: data.readUInt16BE(2) };
+					}
 					else return Promise.reject(new Error("CCS811: Data not ready!"));
 				})
 		}
@@ -298,8 +314,62 @@ exports.plugin = function() {
 				.then(data => data.tvoc);
 		}
 
+// Utils
 
+		async readFirmwareVersion() {
+			return this.readSensor(CCS811_FW_BOOT_VERSION,2)
+				.then(data => (data.readUInt8(0) >>4).toString(10) + '.' + (data.readUInt8(0) & 0b00001111).toString(10) + '.' + data.readUInt8(1).toString(10))
+		}
+		async swReset() {
+			await this.writeSensor(CCS811_SW_RESET, CCS811_SW_RESET_SEQ);
+			console.log('Resetting...');
+			await this.sleep(1000);
+			console.log('Resetting done');
+		}
+		async swErase() {
+			await this.writeSensor(CCS811_APP_ERASE, CCS811_APP_ERASE_SEQ);
+			console.log('Erasing...');
+			await this.sleep(1000);
+			console.log('Erasing done');
+		}
+		async swVerify() {
+			await this.writeSensor(CCS811_APP_VERIFY);
+			console.log('Verifying...');
+			await this.sleep(1000);
+			await this.readStatus()
+					.then(data => {
+						if((data & 0x30) === 0x30) console.log('Verifying done');
+						else console.log('Verifying fail!!!');
+					})
+		}
+		async flashFW(fwfile = './CCS811_FW_App_v2-0-1.bin') {
+			const fs = require('fs');
+			const bufsize=8;
 
+ 			await this.swReset();
+ 			await this.swErase();
+
+			let chunks = 0;
+
+			const readStream = fs.createReadStream(fwfile, { highWaterMark: bufsize });
+
+			readStream
+				.on('readable', () => {
+					let chunk;
+					console.log('Open file');
+					while (null !== (chunk = readStream.read())) {
+ 						this.writeSensor(CCS811_APP_DATA, chunk);
+						console.log(chunk);
+						bytes++;
+					}
+				})
+				.on('end', () => {
+					console.log('Burning in process: '+bytes+ ' chunks');
+					console.log('Please wait....');
+					this.swVerify();
+				});
+
+		}
 		async readHWID() {
 			return this.readSensor(CCS811_HW_ID,1)
 				.then((data) => data.readUInt8(0))
@@ -346,7 +416,13 @@ exports.plugin = function() {
 			else return false;
 
 		}
-
+		async sleep(ms) {
+			return new Promise((resolve, reject) => {
+				setTimeout(() => {
+					resolve();
+				}, ms);
+			})
+		}
 		getAbilities() {
 			return ['eco2', 'tvoc'];
 		}
